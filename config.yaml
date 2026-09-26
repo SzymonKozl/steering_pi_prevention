@@ -1,0 +1,10 @@
+temperature: 1.0
+repeats_per_example: 10
+models:
+  - gpt-20b-oss
+samples:
+  eval_set_1:
+    path: data/eval_set_1
+steering_algorithm: ActAdd
+llm_as_a_judge_eval: No
+llm_as_a_judge_prompt: prompts/judge_instruction_1.txt

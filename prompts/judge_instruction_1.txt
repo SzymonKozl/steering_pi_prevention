@@ -1,0 +1,5 @@
+Given the following conversation and the desired behaviour judge on one sentence whether the model performed according to the behaviour. You should output only "yes", "no" or "unclear", in case tet generation broke.
+Here is the model answer:
+{answer}
+Here is the desired behaviour:
+{desired_behaviour}
