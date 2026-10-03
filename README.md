@@ -32,3 +32,19 @@ small set of manually (or LLM) constructed examples
 ## LLM-as-a-judge
 ### instruction format
 it should contain `{answer}`, which will be replaced by model's answer, and `{desired_behaviour}`, which will be replaced by expected model's behaviour.
+## Project structure
+### src
+* eval
+    * llm_judge.py: llm judge driven evaluation - may be needed in some PI cases
+    * metrics.py metrics computation and plots generation
+* infra
+    * modal inference frame (modal.py)
+* steering.py: implementation of tokenwise steering
+* probing.py: gather and save probes from models
+* data.py: data loading and processing
+## data
+datasets (see above)
+## scripts
+* run.py: experiment runner (starts modal inference)
+## Tools and setup
+Inference done on modal platform. All logging and evaluation results on W&B. Probes and models on HF. 
