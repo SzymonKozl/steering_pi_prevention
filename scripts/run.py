@@ -97,8 +97,8 @@ def main(args: Namespace):
     repo = git.Repo(search_parent_directories=True)
     sha = repo.head.object.hexsha
     wandb.log({"commit_sha": sha})
-    app = modal_infra.get_app()
     img = modal_infra.create_image()
+    app = modal_infra.get_app("role-probing-app", image=img)
     # 1. activation gathering
     gather_actiations_modal = app.function(gather_probes, gpu=cfg["modal"]["gpu"], timeout=cfg["modal"]["timeout"], image=img)
     model_sweep = cfg["steering"]["models"]

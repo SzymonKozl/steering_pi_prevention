@@ -21,7 +21,7 @@ steering:
   max_new_tokens: 2048
 eval:
   llm_as_a_judge_prompt: prompts/judge_instruction_1.txt
-  llm_as_a_judge_model: google/gemini-2.5-pro
+  llm_as_a_judge_model: deepseek/deepseek-v4.1-flash
 modal:
   gpu: H100
   timeout: 3600
