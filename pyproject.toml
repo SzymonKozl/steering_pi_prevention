@@ -15,7 +15,8 @@ dependencies = [
     "pandas",
     "datasets",
     "gitpython",
-    "transformers~=5.19.0"
+    "transformers~=5.19.0",
+    "dotenv"
 ]
 
 [tool.pytest.ini_options]

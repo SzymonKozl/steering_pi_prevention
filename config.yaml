@@ -6,8 +6,15 @@ probing:
     name: en
     split: validation
   probes_repo: SzymonKozl/role_steering_demo_probes
-  layers: [0, 4, 8, 12, 16, 20]
+  layers: 
 steering:
+  layers:
+    - [8]
+  #   - [12],
+  #   - [16],
+  #   - [20],
+  #   - [8, 12, 16, 20]
+  # include_baseline: Yes
   temperature: 1.0
   repeats_per_example: 10
   models:

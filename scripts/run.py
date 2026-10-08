@@ -14,6 +14,7 @@ import torch
 import wandb
 import git
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from dotenv import load_dotenv
 
 sys.path.append(Path(__file__).parent.parent)
 from src.infra import modal as modal_infra
@@ -23,6 +24,9 @@ from src.data.utils import fetch_samples_from_dataset, tokenize_with_role_preser
 from src.steering import hf_upload_steered_outputs, steered_generate
 from src.eval.eval import eval_all
 from src.eval.llm_judge import judge_all
+
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 
 logger = logging.getLogger(__name__)
@@ -35,7 +39,7 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
     probing_samples = fetch_samples_from_dataset(sample_no=cfg["probing"]["sample_no"], **cfg["probing"]["dataset"])
     model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).to(DEVICE)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    layers = cfg["probing"]["layers"]
+    layers = list(sum(set(el) for el in cfg["steering"]["layers"]))
     activations = {layer: [] for layer in layers}
     labels = []
     for target_role in cfg["roles"]:
@@ -54,10 +58,20 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
 def generate_sweep(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     res = []
     for model in cfg["models"]:
-        new_cfg = deepcopy(cfg)
+        new_cfg = deepcopy(cfg) | {"model": model}
         new_cfg.pop("models")
-        res.append(new_cfg | {"model": model})
+        res.append(new_cfg)
+        if cfg["include_baseline"]:
+            res.append(deepcopy(new_cfg) | {"dont_steer": True})
     return res
+
+
+def cfg_to_descriptor(cfg: Dict[str, Any]) -> str:
+    # converts sweep element to loggable key
+    if not "dont_steer" in cfg:
+        return f"{cfg['model']}_{cfg['alpha']}_{cfg['probing']['layers']}"
+    else:
+        return f"{cfg['model']}_baseline"
 
 
 def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tensor]], examples: List[SampleRunnable]) -> List[List[str]]:
@@ -78,6 +92,7 @@ def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tens
             do_sample=True,
             temperature=example.temperature,
             max_new_tokens=cfg["max_new_tokens"],
+            dont_steer=cfg.get("dont_steer", False)
         )
         results.append(tokenizer.batch_decode(outputs[:, input_ids.shape[1]:]))
     return results
@@ -86,6 +101,8 @@ def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tens
 def main(args: Namespace):
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
+        # this flag may be added during later stages
+        assert "dont_steer" not in cfg
     # 0. modal & wandb & hf init
     hf_login(token=os.environ["HF_TOKEN"])
     wandb.init(
@@ -102,40 +119,41 @@ def main(args: Namespace):
     # 1. activation gathering
     gather_actiations_modal = app.function(gather_probes, gpu=cfg["modal"]["gpu"], timeout=cfg["modal"]["timeout"], image=img)
     model_sweep = cfg["steering"]["models"]
-    probes = list(gather_actiations_modal.map(model_sweep, kwargs={"cfg": cfg}))
-    hf_upload_probes(cfg["probing"]["probes_repo"], {model: probe for model, probe in zip(model_sweep, probes)})
+    probes_list = list(gather_actiations_modal.map(model_sweep, kwargs={"cfg": cfg}))
+    probes = {mdl: prb for mld, prb in zip(probes_list, model_sweep, strict=True)}
+    hf_upload_probes(cfg["probing"]["probes_repo"], probes)
     # 2. steering
     cases = dispatch_examples(cfg["steering"])
     sweep = generate_sweep(cfg["steering"])
     run_single_model_modal = app.function(run_single_model, gpu=cfg["modal"]["gpu"], timeout=cfg["modal"]["timeout"], image=img)
     results = list(run_single_model_modal.starmap(
-        [(cfg, extract_steering_vectors(prb)) for cfg, prb in zip(sweep, probes)],
+        [(c, extract_steering_vectors(probes[c["model"]])) for c in sweep],
         kwargs={"examples": cases}
     ))
-    hf_upload_steered_outputs(cases, {model: res for model, res in zip(model_sweep, results)}, cfg["steering"]["outputs_repo"])
+    hf_upload_steered_outputs(cases, {cfg_to_descriptor(cfg["steering"]): res for cfg, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"])
     # 3. evaluating
     for_lm_eval = [case for case in cases if case.desired_behaviour is not None]
     for_auto_eval = [case for case in cases if case.expected_output_value is not None]
     if for_lm_eval:
         judge_prompt = Path(cfg["eval"]["llm_as_a_judge_prompt"]).read_text()
         results_judge = {
-            model: judge_all(for_lm_eval, [r for c, r in zip(cases, resp) if c.desired_behaviour is not None], judge_prompt, model=cfg["eval"]["llm_as_a_judge_model"])
-            for model, resp in zip(model_sweep, results)
+            cfg_to_descriptor(cfg_local): judge_all(for_lm_eval, [r for c, r in zip(cases, resp) if c.desired_behaviour is not None], judge_prompt, model=cfg["eval"]["llm_as_a_judge_model"])
+            for cfg_local, resp in zip(sweep, results)
         }
         wandb.log({"LLM Judge results": wandb.Table(
-            columns=["example_name", "model", "alignment_rate"],
+            columns=["example_name", "desc", "alignment_rate"],
             data=[
-                [s.name, mdl, np.nanmean(r)] for mdl, ress in results_judge.items() for s, r in zip(for_lm_eval, ress)
+                [s.name, desc, np.nanmean(r)] for desc, ress in results_judge.items() for s, r in zip(for_lm_eval, ress)
             ]
         )})
     if for_auto_eval:
         results_auto = {
-            model: eval_all(for_auto_eval, resp) for model, resp in zip(model_sweep, results)
+            cfg_to_descriptor(cfg_local): eval_all(for_auto_eval, resp) for cfg_local, resp in zip(sweep, results)
         }
         wandb.log({"LLM auto results": wandb.Table(
-            columns=["example_name", "model"] + list(next(iter(results_auto.values())).keys()),
+            columns=["example_name", "desc"] + list(next(iter(results_auto.values())).keys()),
             data=[
-                [s.name, mdl, *r.values()] for mdl, ress in results_auto.items() for s, r in zip(for_auto_eval, ress)
+                [s.name, desc, *r.values()] for desc, ress in results_auto.items() for s, r in zip(for_auto_eval, ress)
             ]
         )})
     wandb.finish()

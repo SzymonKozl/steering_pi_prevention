@@ -6,9 +6,17 @@ import re
 from typing import Any, Dict, List, Optional, Union
 import requests
 import yaml
+from dotenv import load_dotenv
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+load_dotenv(REPO_ROOT / ".env")
+
 
 DEFAULT_PROMPT_PATH = (
-    Path(__file__).resolve().parent.parent.parent
+    REPO_ROOT
     / "prompts"
     / "forgery_prompt_default.yaml"
 )

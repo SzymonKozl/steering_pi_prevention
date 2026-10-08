@@ -266,6 +266,7 @@ def steered_generate(
     operator: Union[str, SteeringOperator] = "ActAdd",
     alpha: float = 1.0,
     use_cache: bool = True,
+    dont_steerL bool = False,
     **generate_kwargs,
 ) -> torch.Tensor:
     """
@@ -281,15 +282,23 @@ def steered_generate(
         use_cache: Whether generation uses KV caching.
         generate_kwargs: Additional kwargs passed to model.generate.
     """
-    with SteeringHookManager(
-        model=model,
-        layers=layers,
-        token_roles=token_roles,
-        role_to_vector=role_to_vector,
-        operator=operator,
-        alpha=alpha,
-        use_cache=use_cache,
-    ):
+    if not dont_steer:
+        with SteeringHookManager(
+            model=model,
+            layers=layers,
+            token_roles=token_roles,
+            role_to_vector=role_to_vector,
+            operator=operator,
+            alpha=alpha,
+            use_cache=use_cache,
+        ):
+            return model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=use_cache,
+                **generate_kwargs,
+            )
+    else:
         return model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
