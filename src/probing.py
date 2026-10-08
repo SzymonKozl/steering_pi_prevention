@@ -6,6 +6,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
+from huggingface_hub import create_repo, upload_file
+import tempfile
 
 from src.steering import get_model_layers
 
@@ -285,3 +287,23 @@ def predict_role_probabilities(
     """
     x = activations.to(torch.float32).cpu().numpy()
     return probe.predict_proba(x)
+
+
+def hf_upload_probes(repo_path: str, probes: Dict[str, Dict[int, Dict[str, Any]]]):
+    repo_id = create_repo(
+        repo_path,
+        repo_type="model",
+        exist_ok=True,
+    ).repo_id
+
+    for model_name, probes_for_model in probes.items():
+        with tempfile.NamedTemporaryFile(suffix=".pkl") as f:
+            joblib.dump(probes_for_model, f)
+            f.flush()
+
+            upload_file(
+                path_or_fileobj=f.name,
+                path_in_repo=f"classifires_{model_name}.pkl",
+                repo_id=repo_id,
+                repo_type="model",
+            )

@@ -1,10 +1,36 @@
-temperature: 1.0
-repeats_per_example: 10
-models:
-  - gpt-20b-oss
-samples:
-  eval_set_1:
-    path: data/eval_set_1
-steering_algorithm: ActAdd
-llm_as_a_judge_eval: No
-llm_as_a_judge_prompt: prompts/judge_instruction_1.txt
+probing:
+  sample_no: 400
+  max_seqlen: 512
+  dataset:
+    path: allenai/c4
+    name: en
+    split: validation
+  probes_repo: SzymonKozl/role_steering_demo_probes
+  layers: [0, 4, 8, 12, 16, 20]
+steering:
+  temperature: 1.0
+  repeats_per_example: 10
+  models:
+    - openai/gpt-oss-20b
+  samples:
+    eval_set_1:
+      path: data/eval_set_1
+  steering_algorithm: ActAdd
+  outputs_repo: SzymonKozl/role_steering_demo_outputs
+  alpha: 1.0
+  max_new_tokens: 2048
+eval:
+  llm_as_a_judge_prompt: prompts/judge_instruction_1.txt
+  llm_as_a_judge_model: google/gemini-2.5-pro
+modal:
+  gpu: H100
+  timeout: 3600
+run_name: role_steering_setup_test_1
+wandb_project: role_steering
+wandb_entity: sf-kozlowski-university-of-warsaw
+roles:
+  - system
+  - user
+  - cot
+  - tool
+  - assistant

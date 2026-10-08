@@ -2,7 +2,9 @@ import abc
 from typing import Dict, List, Optional, Union
 import torch
 import torch.nn as nn
+import datasets
 
+from src.data.dataset import SampleRunnable
 
 class SteeringOperator(abc.ABC):
     @abc.abstractmethod
@@ -294,3 +296,15 @@ def steered_generate(
             use_cache=use_cache,
             **generate_kwargs,
         )
+
+
+def hf_upload_steered_outputs(samples: List[SampleRunnable], outputs: Dict[str, List[List[str]]], repo_name: str):
+    as_dict = {}
+    for model, responses_by_model in outputs.items():
+        rows = [
+            sample.__dict__ | {"response": resp}
+            for sample, responses in zip(samples, responses_by_model, strict=True) for resp in responses
+        ]
+        as_dict[model] = datasets.Dataset.from_list(rows)
+    ds = datasets.DatasetDict(as_dict)
+    ds.push_to_hub(repo_name, private=False, exist_ok=True)

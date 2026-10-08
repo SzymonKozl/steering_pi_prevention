@@ -21,7 +21,8 @@ Tokenwise steering, in this sense, is rather not used in literature, I expect th
             },
             ...
         ],
-        "desired_behaviour": "text description of desired model behaviour under given prompts (optional)"
+        "desired_behaviour": "for llm judge; text description of desired model behaviour under given prompts (optional, either this or expected_output should be provided)",
+        "expected_output": "for conventional eval; model is desired to return exactly this text (optional, either this or desired_behaviour should be provided)"
     },
     ...
 }
