@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import datasets
 
-from src.data.dataset import SampleRunnable
+from role_steering.data.dataset import SampleRunnable
 
 class SteeringOperator(abc.ABC):
     @abc.abstractmethod
@@ -266,7 +266,7 @@ def steered_generate(
     operator: Union[str, SteeringOperator] = "ActAdd",
     alpha: float = 1.0,
     use_cache: bool = True,
-    dont_steerL bool = False,
+    dont_steer: bool = False,
     **generate_kwargs,
 ) -> torch.Tensor:
     """

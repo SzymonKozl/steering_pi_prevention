@@ -8,8 +8,9 @@ import torch
 import torch.nn as nn
 from huggingface_hub import create_repo, upload_file
 import tempfile
+import modal
 
-from src.steering import get_model_layers
+from role_steering.steering import get_model_layers
 
 
 class ActivationCollector:

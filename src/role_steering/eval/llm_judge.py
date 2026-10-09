@@ -3,8 +3,8 @@ from typing import List, Optional
 
 import numpy as np
 
-from src.data.dataset import SampleRunnable
-from src.data.generation import call_llm_api
+from role_steering.data.dataset import SampleRunnable
+from role_steering.data.generation import call_llm_api
 
 
 DEFAULT_JUDGE_MODEL = "google/gemini-2.5-pro"

@@ -6,27 +6,30 @@ from pathlib import Path
 import os
 import logging
 
-import yaml
 import modal
-from huggingface_hub import login as hf_login
 import numpy as np
 import torch
-import wandb
-import git
+if modal.is_local():
+    import wandb
+    import git
+    from huggingface_hub import login as hf_login
+    from dotenv import load_dotenv
+    import yaml
+    import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from dotenv import load_dotenv
 
 sys.path.append(Path(__file__).parent.parent)
-from src.infra import modal as modal_infra
-from src.probing import hf_upload_probes, train_role_probes, collect_layer_activations, extract_steering_vectors
-from src.data.dataset import dispatch_examples, SampleRunnable
-from src.data.utils import fetch_samples_from_dataset, tokenize_with_role_preservation
-from src.steering import hf_upload_steered_outputs, steered_generate
-from src.eval.eval import eval_all
-from src.eval.llm_judge import judge_all
+from role_steering.infra import modal as modal_infra
+from role_steering.probing import hf_upload_probes, train_role_probes, collect_layer_activations, extract_steering_vectors
+from role_steering.data.dataset import dispatch_examples, SampleRunnable
+from role_steering.data.utils import fetch_samples_from_dataset, tokenize_with_role_preservation
+from role_steering.steering import hf_upload_steered_outputs, steered_generate
+from role_steering.eval.eval import eval_all
+from role_steering.eval.llm_judge import judge_all
 
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+if modal.is_local():
+    load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 
 logger = logging.getLogger(__name__)
@@ -39,10 +42,12 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
     probing_samples = fetch_samples_from_dataset(sample_no=cfg["probing"]["sample_no"], **cfg["probing"]["dataset"])
     model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).to(DEVICE)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    layers = list(sum(set(el) for el in cfg["steering"]["layers"]))
+    layers = set.union(*[set(el) for el in cfg["steering"]["layers"]])
     activations = {layer: [] for layer in layers}
     labels = []
+    logger.info(f"collecting activations for {model_name}")
     for target_role in cfg["roles"]:
+        logger.info(f"role: {target_role}")
         for text_sample in probing_samples:
             input_ids, token_roles = tokenize_with_role_preservation(
                 [{"role": target_role, "text": text_sample}], tokenizer, max_tokens_per_message=cfg["probing"]["max_seqlen"]
@@ -52,6 +57,7 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
             for layer in layers:
                 activations[layer].append(sample_acts[layer])
             labels += [target_role] * len(content_idx)
+    logger.info(f"training classifiers for {model_name}")
     return train_role_probes({layer: torch.cat(acts) for layer, acts in activations.items()}, labels)
 
 
@@ -75,6 +81,7 @@ def cfg_to_descriptor(cfg: Dict[str, Any]) -> str:
 
 
 def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tensor]], examples: List[SampleRunnable]) -> List[List[str]]:
+    logger.info(f"steering for {cfg['model']}; dont_steer={cfg['dont_steer']}")
     model = AutoModelForCausalLM.from_pretrained(cfg["model"], trust_remote_code=True).to(DEVICE)
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"], trust_remote_code=True)
     results = []
@@ -105,6 +112,8 @@ def main(args: Namespace):
         assert "dont_steer" not in cfg
     # 0. modal & wandb & hf init
     hf_login(token=os.environ["HF_TOKEN"])
+    print(os.environ["SRANIE"])
+    wandb.login(os.environ["WANDB_API_KEY"])
     wandb.init(
         entity=cfg["wandb_entity"],
         project=cfg["wandb_project"],
@@ -117,45 +126,49 @@ def main(args: Namespace):
     img = modal_infra.create_image()
     app = modal_infra.get_app("role-probing-app", image=img)
     # 1. activation gathering
-    gather_actiations_modal = app.function(gather_probes, gpu=cfg["modal"]["gpu"], timeout=cfg["modal"]["timeout"], image=img)
+    gather_actiations_modal = modal_infra.func_wrap(gather_probes, app, cfg)
     model_sweep = cfg["steering"]["models"]
-    probes_list = list(gather_actiations_modal.map(model_sweep, kwargs={"cfg": cfg}))
-    probes = {mdl: prb for mld, prb in zip(probes_list, model_sweep, strict=True)}
-    hf_upload_probes(cfg["probing"]["probes_repo"], probes)
-    # 2. steering
-    cases = dispatch_examples(cfg["steering"])
-    sweep = generate_sweep(cfg["steering"])
-    run_single_model_modal = app.function(run_single_model, gpu=cfg["modal"]["gpu"], timeout=cfg["modal"]["timeout"], image=img)
-    results = list(run_single_model_modal.starmap(
-        [(c, extract_steering_vectors(probes[c["model"]])) for c in sweep],
-        kwargs={"examples": cases}
-    ))
-    hf_upload_steered_outputs(cases, {cfg_to_descriptor(cfg["steering"]): res for cfg, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"])
-    # 3. evaluating
-    for_lm_eval = [case for case in cases if case.desired_behaviour is not None]
-    for_auto_eval = [case for case in cases if case.expected_output_value is not None]
-    if for_lm_eval:
-        judge_prompt = Path(cfg["eval"]["llm_as_a_judge_prompt"]).read_text()
-        results_judge = {
-            cfg_to_descriptor(cfg_local): judge_all(for_lm_eval, [r for c, r in zip(cases, resp) if c.desired_behaviour is not None], judge_prompt, model=cfg["eval"]["llm_as_a_judge_model"])
-            for cfg_local, resp in zip(sweep, results)
-        }
-        wandb.log({"LLM Judge results": wandb.Table(
-            columns=["example_name", "desc", "alignment_rate"],
-            data=[
-                [s.name, desc, np.nanmean(r)] for desc, ress in results_judge.items() for s, r in zip(for_lm_eval, ress)
-            ]
-        )})
-    if for_auto_eval:
-        results_auto = {
-            cfg_to_descriptor(cfg_local): eval_all(for_auto_eval, resp) for cfg_local, resp in zip(sweep, results)
-        }
-        wandb.log({"LLM auto results": wandb.Table(
-            columns=["example_name", "desc"] + list(next(iter(results_auto.values())).keys()),
-            data=[
-                [s.name, desc, *r.values()] for desc, ress in results_auto.items() for s, r in zip(for_auto_eval, ress)
-            ]
-        )})
+    with app.run():
+        probes_list = list(gather_actiations_modal.map(model_sweep, kwargs={"cfg": cfg}))
+        probes = {mdl: prb for mld, prb in zip(probes_list, model_sweep, strict=True)}
+        hf_upload_probes(cfg["probing"]["probes_repo"], probes)
+        # 2. steering
+        cases = dispatch_examples(cfg["steering"])
+        sweep = generate_sweep(cfg["steering"])
+        run_single_model_modal = modal_infra.func_wrap(run_single_model, app, cfg)
+        results = list(run_single_model_modal.starmap(
+            [(c, extract_steering_vectors(probes[c["model"]])) for c in sweep],
+            kwargs={"examples": cases}
+        ))
+        logger.info(f"uploading steered outputs to {cfg['steering']['outputs_repo']}")
+        hf_upload_steered_outputs(cases, {cfg_to_descriptor(cfg["steering"]): res for cfg, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"])
+        # 3. evaluating
+        for_lm_eval = [case for case in cases if case.desired_behaviour is not None]
+        for_auto_eval = [case for case in cases if case.expected_output_value is not None]
+        logger.info(f"LLM as a judge evaluation: ({len(for_lm_eval)} cases)")
+        if for_lm_eval:
+            judge_prompt = Path(cfg["eval"]["llm_as_a_judge_prompt"]).read_text()
+            results_judge = {
+                cfg_to_descriptor(cfg_local): judge_all(for_lm_eval, [r for c, r in zip(cases, resp) if c.desired_behaviour is not None], judge_prompt, model=cfg["eval"]["llm_as_a_judge_model"])
+                for cfg_local, resp in zip(sweep, results)
+            }
+            wandb.log({"LLM Judge results": wandb.Table(
+                columns=["example_name", "desc", "alignment_rate"],
+                data=[
+                    [s.name, desc, np.nanmean(r)] for desc, ress in results_judge.items() for s, r in zip(for_lm_eval, ress)
+                ]
+            )})
+        logger.info(f"Auto evaluation: ({len(for_auto_eval)} cases)")
+        if for_auto_eval:
+            results_auto = {
+                cfg_to_descriptor(cfg_local): eval_all(for_auto_eval, resp) for cfg_local, resp in zip(sweep, results)
+            }
+            wandb.log({"LLM auto results": wandb.Table(
+                columns=["example_name", "desc"] + list(next(iter(results_auto.values())).keys()),
+                data=[
+                    [s.name, desc, *r.values()] for desc, ress in results_auto.items() for s, r in zip(for_auto_eval, ress)
+                ]
+            )})
     wandb.finish()
 
 

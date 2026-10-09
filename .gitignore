@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 uv.lock
 .env
+wandb/
+*.egg-info
+dist

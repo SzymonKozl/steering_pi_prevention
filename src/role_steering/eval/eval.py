@@ -1,5 +1,6 @@
 from typing import List, Dict, Any
 import numpy as np
+from role_steering.data.dataset import SampleRunnable
 
 
 def eval_exact(sample: SampleRunnable, responses: List[str]) -> np.ndarray:
