@@ -15,6 +15,7 @@ if modal.is_local():
     from huggingface_hub import login as hf_login
     from dotenv import load_dotenv
     import yaml
+else:
     import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -39,16 +40,17 @@ DEVICE = "cuda"
 
 
 def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    print(f"collecting activations for {model_name}")
     probing_samples = fetch_samples_from_dataset(sample_no=cfg["probing"]["sample_no"], **cfg["probing"]["dataset"])
     model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).to(DEVICE)
+    print("loaded model...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     layers = set.union(*[set(el) for el in cfg["steering"]["layers"]])
     activations = {layer: [] for layer in layers}
     labels = []
-    logger.info(f"collecting activations for {model_name}")
     for target_role in cfg["roles"]:
-        logger.info(f"role: {target_role}")
-        for text_sample in probing_samples:
+        print(f"role: {target_role}")
+        for text_sample in tqdm.tqdm(probing_samples, "forwarding calibration set..."):
             input_ids, token_roles = tokenize_with_role_preservation(
                 [{"role": target_role, "text": text_sample}], tokenizer, max_tokens_per_message=cfg["probing"]["max_seqlen"]
             )
@@ -57,7 +59,7 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
             for layer in layers:
                 activations[layer].append(sample_acts[layer])
             labels += [target_role] * len(content_idx)
-    logger.info(f"training classifiers for {model_name}")
+    print(f"training classifiers for {model_name}")
     return train_role_probes({layer: torch.cat(acts) for layer, acts in activations.items()}, labels)
 
 
@@ -112,7 +114,6 @@ def main(args: Namespace):
         assert "dont_steer" not in cfg
     # 0. modal & wandb & hf init
     hf_login(token=os.environ["HF_TOKEN"])
-    print(os.environ["SRANIE"])
     wandb.login(os.environ["WANDB_API_KEY"])
     wandb.init(
         entity=cfg["wandb_entity"],

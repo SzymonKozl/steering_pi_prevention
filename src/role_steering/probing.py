@@ -1,5 +1,7 @@
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from pathlib import Path
+import tempfile
+
 import joblib
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -7,8 +9,9 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 from huggingface_hub import create_repo, upload_file
-import tempfile
 import modal
+if not modal.is_local():
+    import tqdm
 
 from role_steering.steering import get_model_layers
 
@@ -176,7 +179,7 @@ def train_role_probes(
         max_iter: Maximum training iterations.
     """
     results = {}
-    for layer_idx, acts in layer_activations.items():
+    for layer_idx, acts in tqdm.tqdm(layer_activations.items(), "training probes on layers"):
         clf, acc = train_linear_probe(
             activations=acts,
             labels=labels,

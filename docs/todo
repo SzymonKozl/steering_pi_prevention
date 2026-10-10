@@ -1,0 +1,2 @@
+* two uv packages - one for local stuff; one for modal
+* move to cuml from pure scikit-learn

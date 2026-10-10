@@ -18,7 +18,8 @@ def func_wrap(func, app, cfg, **kwargs):
         "image": create_image(), 
         "volumes": {HF_CACHE_VOL_PATH: hf_cache_vol()},
         "secrets": [modal.Secret.from_name("huggingface-secret")],
-        "cpu": 2.0
+        "cpu": 2.0,
+        "memory": 16000
     }
     kwargs_default.update(kwargs)
     return app.function(
@@ -39,7 +40,7 @@ def create_image():
         "cupy-cuda13x==14.0.1",
         "cuml-cu13",
         "scikit-learn",
-        "kernels==0.11.5",
+        "kernels==0.17",
         "zstandard",
         "kaleido",
         "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.5.4/flash_attn-2.8.3+cu128torch2.9-cp312-cp312-linux_x86_64.whl"
