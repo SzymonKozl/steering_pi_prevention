@@ -1,4 +1,5 @@
 probing:
+  try_reuse_repo: Yes
   sample_no: 400
   max_seqlen: 512
   dataset:
@@ -22,9 +23,13 @@ steering:
   samples:
     eval_set_1:
       path: data/eval_set_1
-  steering_algorithm: ActAdd
+  steering_algorithm:
+    act_add:
+      name: ActAdd
+      params:
+        alpha: 
+          - 1.0
   outputs_repo: SzymonKozl/role_steering_demo_outputs
-  alpha: 1.0
   max_new_tokens: 2048
 eval:
   llm_as_a_judge_prompt: prompts/judge_instruction_1.txt

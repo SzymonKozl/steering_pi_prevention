@@ -1,10 +1,11 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from argparse import ArgumentParser, Namespace
 from copy import deepcopy
 import sys
 from pathlib import Path
 import os
 import logging
+from itertools import product
 
 import modal
 import numpy as np
@@ -21,7 +22,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.append(Path(__file__).parent.parent)
 from role_steering.infra import modal as modal_infra
-from role_steering.probing import hf_upload_probes, train_role_probes, collect_layer_activations, extract_steering_vectors
+from role_steering.probing import hf_upload_probes, hf_download_probes, train_role_probes, collect_layer_activations, extract_steering_vectors
 from role_steering.data.dataset import dispatch_examples, SampleRunnable
 from role_steering.data.utils import fetch_samples_from_dataset, tokenize_with_role_preservation
 from role_steering.steering import hf_upload_steered_outputs, steered_generate
@@ -65,27 +66,45 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
     return train_role_probes({layer: torch.cat(acts) for layer, acts in activations.items()}, labels, groups)
 
 
+def _sweep_over_steering_alg(alg_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    res = []
+    keys = alg_cfg["params"].keys()
+    for cfg in product(*[alg_cfg["params"][k] for k in keys]):
+        new_cfg = deepcopy(alg_cfg)
+        new_cfg["params"] = {k: v for (k, v) in zip(keys, cfg)}
+        res.append(new_cfg)
+    return res
+
+
 def generate_sweep(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     res = []
     for model in cfg["models"]:
-        new_cfg = deepcopy(cfg) | {"model": model}
-        new_cfg.pop("models")
-        res.append(new_cfg)
-        if cfg["include_baseline"]:
-            res.append(deepcopy(new_cfg) | {"dont_steer": True})
+        for alg_cfg in cfg["steering_algorithm"].values():
+            for alg_params in _sweep_over_steering_alg(alg_cfg):
+                for layer_set in cfg["layers"]:
+                    new_cfg = deepcopy(cfg) | {"model": model, "steering_algorithm": alg_params, "layers": layer_set}
+                    new_cfg.pop("models")
+                    res.append(new_cfg)
+                    if cfg["include_baseline"]:
+                        res.append(deepcopy(new_cfg) | {"dont_steer": True})
     return res
+
+
+def params_descr(alg_cfg: Dict[Any, str]) -> str:
+    return "".join([alg_cfg["name"]] + [f"_{k}_{v}" for k, v in alg_cfg["params"].items()])
 
 
 def cfg_to_descriptor(cfg: Dict[str, Any]) -> str:
     # converts sweep element to loggable key
     if not "dont_steer" in cfg:
-        return f"{cfg['model']}_{cfg['alpha']}_{cfg['probing']['layers']}"
+        return f"{cfg['model']}_{params_descr(cfg['steering_algorithm'])}_{cfg['layers']}"
     else:
         return f"{cfg['model']}_baseline"
 
 
 def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tensor]], examples: List[SampleRunnable]) -> List[List[str]]:
-    logger.info(f"steering for {cfg['model']}; dont_steer={cfg['dont_steer']}")
+    dont_steer = cfg.get('dont_steer', False)
+    print(f"steering for {cfg['model']}; dont_steer={dont_steer}")
     model = AutoModelForCausalLM.from_pretrained(cfg["model"], trust_remote_code=True).to(DEVICE)
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"], trust_remote_code=True)
     results = []
@@ -98,12 +117,12 @@ def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tens
             layers=list(probes.keys()),
             token_roles=[token_roles] * example.repeats,
             role_to_vector=probes,
-            operator=cfg["steering_algorithm"],
-            alpha=cfg["alpha"],
+            operator=cfg["steering_algorithm"]["name"],
+            alpha=cfg["steering_algorithm"]["params"]["alpha"],
             do_sample=True,
             temperature=example.temperature,
             max_new_tokens=cfg["max_new_tokens"],
-            dont_steer=cfg.get("dont_steer", False)
+            dont_steer=dont_steer
         )
         results.append(tokenizer.batch_decode(outputs[:, input_ids.shape[1]:]))
     return results
@@ -133,9 +152,13 @@ def main(args: Namespace):
     run_single_model_modal = modal_infra.func_wrap(run_single_model, app, cfg)
     model_sweep = cfg["steering"]["models"]
     with app.run():
-        probes_list = list(gather_actiations_modal.map(model_sweep, kwargs={"cfg": cfg}))
-        probes = {mdl: prb for mdl, prb in zip(model_sweep, probes_list, strict=True)}
-        hf_upload_probes(cfg["probing"]["probes_repo"], probes)
+        if cfg["probing"]["try_reuse_repo"]:
+            print("trying to reuse probes from ", cfg["probing"]["probes_repo"])
+            probes = hf_download_probes(cfg["probing"]["probes_repo"], model_sweep)
+        else:
+            probes_list = list(gather_actiations_modal.map(model_sweep, kwargs={"cfg": cfg}))
+            probes = {mdl: prb for mdl, prb in zip(model_sweep, probes_list, strict=True)}
+            hf_upload_probes(cfg["probing"]["probes_repo"], probes)
         # 2. steering
         cases = dispatch_examples(cfg["steering"])
         sweep = generate_sweep(cfg["steering"])
@@ -144,7 +167,7 @@ def main(args: Namespace):
             kwargs={"examples": cases}
         ))
         logger.info(f"uploading steered outputs to {cfg['steering']['outputs_repo']}")
-        hf_upload_steered_outputs(cases, {cfg_to_descriptor(cfg["steering"]): res for cfg, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"])
+        hf_upload_steered_outputs(cases, {cfg_to_descriptor(cfg_local): res for cfg_local, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"])
         # 3. evaluating
         for_lm_eval = [case for case in cases if case.desired_behaviour is not None]
         for_auto_eval = [case for case in cases if case.expected_output_value is not None]

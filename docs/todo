@@ -1,2 +1,3 @@
 * two uv packages - one for local stuff; one for modal
-* move to cuml from pure scikit-learn
+* loading probes from hf
+* loading reposnses from hf for eval

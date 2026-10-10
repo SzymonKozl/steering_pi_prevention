@@ -8,7 +8,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
-from huggingface_hub import create_repo, upload_file
+from huggingface_hub import create_repo, upload_file, hf_hub_download
 import modal
 if not modal.is_local():
     import tqdm
@@ -211,7 +211,7 @@ def extract_role_vectors(
         classes: Role name for each integer label.
     """
     coef = torch.as_tensor(_to_numpy(probe.coef_), dtype=torch.float32)
-    intercept = _to_numpy(probe.intercept_).astype(float).reshape(-1)
+    intercept = _to_numpy(probe.intercept_).reshape(-1).tolist()
 
     if len(classes) == 2:
         return {
@@ -317,3 +317,10 @@ def hf_upload_probes(repo_path: str, probes: Dict[str, Dict[int, Dict[str, Any]]
                 repo_id=repo_id,
                 repo_type="model",
             )
+
+
+def hf_download_probes(repo_path: str, model_names: List[str]) -> Dict[str, Dict[int, Dict[str, Any]]]:
+    return {
+        model_name: torch.load(hf_hub_download(repo_path, f"probes_{model_name}.pt", repo_type="model"), weights_only=True)
+        for model_name in model_names
+    }

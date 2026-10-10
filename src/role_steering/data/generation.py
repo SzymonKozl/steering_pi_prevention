@@ -6,7 +6,7 @@ import re
 from typing import Any, Dict, List, Optional, Union
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
 import modal
@@ -307,7 +307,7 @@ def generate_and_save_example(
 
     example_dict = build_project_example(
         name=name,
-        user_text=generated_text,
+        user_text=f"{harmful_question}\n{generated_text}",
         system_prompt=system_prompt,
         desired_behaviour=desired_behaviour,
     )
