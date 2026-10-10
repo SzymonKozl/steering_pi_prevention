@@ -14,7 +14,7 @@ steering:
   #   - [16],
   #   - [20],
   #   - [8, 12, 16, 20]
-  # include_baseline: Yes
+  include_baseline: Yes
   temperature: 1.0
   repeats_per_example: 10
   models:

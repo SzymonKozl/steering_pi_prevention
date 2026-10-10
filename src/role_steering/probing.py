@@ -117,18 +117,24 @@ def collect_layer_activations(
         return collector.get_stacked_activations()
 
 
+def _to_numpy(a: Any) -> np.ndarray:
+    return a.get() if hasattr(a, "get") else np.asarray(a)
+
+
 def train_linear_probe(
     activations: torch.Tensor,
     labels: Union[List[Any], np.ndarray, torch.Tensor],
-    eval_fraction: float = 0.2,
-    random_state: int = 42,
-    c_val: float = 1.0,
-    max_iter: int = 1000,
-) -> Tuple[LogisticRegression, float]:
+    groups: Optional[Union[List[Any], np.ndarray]] = None,
+    eval_fraction: float = 0.1,
+    random_state: int = 1234,
+    c_val: float = 5e-3,
+    max_iter: int = 2000,
+) -> Tuple[Any, float]:
     """
     Args:
         activations: Activation tensor of shape (N, hidden_dim).
-        labels: Label array of length N.
+        labels: Integer label array of length N.
+        groups: Optional sequence id per token; if given, the split is done on whole sequences.
         eval_fraction: Holdout fraction for evaluation.
         random_state: Seed for reproducible train/test split.
         c_val: Regularization parameter C for LogisticRegression.
@@ -142,7 +148,12 @@ def train_linear_probe(
             f"Shape mismatch: activations ({len(x)}) vs labels ({len(y)})"
         )
 
-    if eval_fraction > 0.0:
+    if eval_fraction > 0.0 and groups is not None:
+        groups = np.asarray(groups)
+        _, test_groups = train_test_split(np.unique(groups), test_size=eval_fraction, random_state=random_state)
+        is_test = np.isin(groups, test_groups)
+        x_train, y_train, x_eval, y_eval = x[~is_test], y[~is_test], x[is_test], y[is_test]
+    elif eval_fraction > 0.0:
         x_train, x_eval, y_train, y_eval = train_test_split(
             x,
             y,
@@ -154,67 +165,63 @@ def train_linear_probe(
         x_train, y_train = x, y
         x_eval, y_eval = x, y
 
-    clf = LogisticRegression(C=c_val, max_iter=max_iter)
+    try:
+        import cuml
+        clf = cuml.linear_model.LogisticRegression(penalty="l2", C=c_val, max_iter=max_iter, fit_intercept=True)
+    except ImportError as e:
+        print(f"could not import cuml; falling back to sklearn! ({e})")
+        clf = LogisticRegression(C=c_val, max_iter=max_iter)
     clf.fit(x_train, y_train)
 
-    accuracy = float(clf.score(x_eval, y_eval))
+    accuracy = float((_to_numpy(clf.predict(x_eval)) == y_eval).mean())
     return clf, accuracy
 
 
 def train_role_probes(
     layer_activations: Dict[int, torch.Tensor],
     labels: Union[List[Any], np.ndarray],
-    eval_fraction: float = 0.2,
-    random_state: int = 42,
-    c_val: float = 1.0,
-    max_iter: int = 1000,
+    groups: Optional[Union[List[Any], np.ndarray]] = None,
+    **probe_kwargs: Any,
 ) -> Dict[int, Dict[str, Any]]:
     """
     Args:
         layer_activations: Dictionary mapping layer indices to activation tensors.
-        labels: Label array corresponding to activations.
-        eval_fraction: Fraction for test evaluation.
-        random_state: Random split seed.
-        c_val: Inverse regularization strength.
-        max_iter: Maximum training iterations.
+        labels: Role label array corresponding to activations.
+        groups: Optional sequence id per token, used for the train/test split.
+        probe_kwargs: Passed to train_linear_probe.
+    Returns:
+        {layer: {"coef": {role: (D,) tensor}, "intercept": {role: float}, "accuracy": float}}
     """
+    classes, y = np.unique(np.asarray(labels), return_inverse=True)
     results = {}
     for layer_idx, acts in tqdm.tqdm(layer_activations.items(), "training probes on layers"):
-        clf, acc = train_linear_probe(
-            activations=acts,
-            labels=labels,
-            eval_fraction=eval_fraction,
-            random_state=random_state,
-            c_val=c_val,
-            max_iter=max_iter,
-        )
-        results[layer_idx] = {
-            "probe": clf,
-            "accuracy": acc,
-            "classes": clf.classes_.tolist(),
-        }
+        clf, acc = train_linear_probe(acts, y, groups, **probe_kwargs)
+        print(f"layer {layer_idx} probe accuracy: {acc:.3f}")
+        results[layer_idx] = extract_role_vectors(clf, classes.tolist()) | {"accuracy": acc}
     return results
 
 
 def extract_role_vectors(
-    probe: LogisticRegression,
-) -> Dict[str, torch.Tensor]:
+    probe: Any,
+    classes: List[str],
+) -> Dict[str, Dict[str, Any]]:
     """
     Args:
-        probe: Fitted LogisticRegression classifier.
+        probe: Fitted (cuml or sklearn) LogisticRegression classifier trained on integer labels.
+        classes: Role name for each integer label.
     """
-    classes = probe.classes_.tolist()
-    vectors = {}
-    coef = torch.as_tensor(probe.coef_, dtype=torch.float32)
+    coef = torch.as_tensor(_to_numpy(probe.coef_), dtype=torch.float32)
+    intercept = _to_numpy(probe.intercept_).astype(float).reshape(-1)
 
     if len(classes) == 2:
-        vectors[str(classes[1])] = coef[0]
-        vectors[str(classes[0])] = -coef[0]
-    else:
-        for idx, cls_name in enumerate(classes):
-            vectors[str(cls_name)] = coef[idx]
-
-    return vectors
+        return {
+            "coef": {str(classes[1]): coef[0], str(classes[0]): -coef[0]},
+            "intercept": {str(classes[1]): intercept[0], str(classes[0]): -intercept[0]},
+        }
+    return {
+        "coef": {str(c): coef[i] for i, c in enumerate(classes)},
+        "intercept": {str(c): intercept[i] for i, c in enumerate(classes)},
+    }
 
 
 def extract_steering_vectors(
@@ -224,10 +231,7 @@ def extract_steering_vectors(
     Args:
         role_probes: Output dictionary from train_role_probes.
     """
-    return {
-        layer_idx: extract_role_vectors(info["probe"])
-        for layer_idx, info in role_probes.items()
-    }
+    return {layer_idx: info["coef"] for layer_idx, info in role_probes.items()}
 
 
 def save_steering_vectors(
@@ -281,16 +285,19 @@ def load_probes(
 
 
 def predict_role_probabilities(
-    probe: LogisticRegression,
+    probe: Dict[str, Any],
     activations: torch.Tensor,
 ) -> np.ndarray:
     """
     Args:
-        probe: Fitted LogisticRegression probe.
+        probe: Single-layer entry from train_role_probes.
         activations: Activation tensor of shape (N, hidden_dim).
+    Returns:
+        (N, n_roles) probabilities, roles ordered as in probe["coef"].
     """
-    x = activations.to(torch.float32).cpu().numpy()
-    return probe.predict_proba(x)
+    w = torch.stack(list(probe["coef"].values()))
+    b = torch.tensor(list(probe["intercept"].values()), dtype=torch.float32)
+    return torch.softmax(activations.to(torch.float32) @ w.T + b, dim=-1).numpy()
 
 
 def hf_upload_probes(repo_path: str, probes: Dict[str, Dict[int, Dict[str, Any]]]):
@@ -301,13 +308,12 @@ def hf_upload_probes(repo_path: str, probes: Dict[str, Dict[int, Dict[str, Any]]
     ).repo_id
 
     for model_name, probes_for_model in probes.items():
-        with tempfile.NamedTemporaryFile(suffix=".pkl") as f:
-            joblib.dump(probes_for_model, f)
-            f.flush()
+        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
+            torch.save(probes_for_model, f.name)
 
             upload_file(
                 path_or_fileobj=f.name,
-                path_in_repo=f"classifires_{model_name}.pkl",
+                path_in_repo=f"probes_{model_name}.pt",
                 repo_id=repo_id,
                 repo_type="model",
             )

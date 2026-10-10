@@ -48,9 +48,10 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
     layers = set.union(*[set(el) for el in cfg["steering"]["layers"]])
     activations = {layer: [] for layer in layers}
     labels = []
+    groups = []
     for target_role in cfg["roles"]:
         print(f"role: {target_role}")
-        for text_sample in tqdm.tqdm(probing_samples, "forwarding calibration set..."):
+        for sample_ix, text_sample in enumerate(tqdm.tqdm(probing_samples, "forwarding calibration set...")):
             input_ids, token_roles = tokenize_with_role_preservation(
                 [{"role": target_role, "text": text_sample}], tokenizer, max_tokens_per_message=cfg["probing"]["max_seqlen"]
             )
@@ -59,8 +60,9 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
             for layer in layers:
                 activations[layer].append(sample_acts[layer])
             labels += [target_role] * len(content_idx)
+            groups += [f"{target_role}_{sample_ix}"] * len(content_idx)
     print(f"training classifiers for {model_name}")
-    return train_role_probes({layer: torch.cat(acts) for layer, acts in activations.items()}, labels)
+    return train_role_probes({layer: torch.cat(acts) for layer, acts in activations.items()}, labels, groups)
 
 
 def generate_sweep(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -128,15 +130,15 @@ def main(args: Namespace):
     app = modal_infra.get_app("role-probing-app", image=img)
     # 1. activation gathering
     gather_actiations_modal = modal_infra.func_wrap(gather_probes, app, cfg)
+    run_single_model_modal = modal_infra.func_wrap(run_single_model, app, cfg)
     model_sweep = cfg["steering"]["models"]
     with app.run():
         probes_list = list(gather_actiations_modal.map(model_sweep, kwargs={"cfg": cfg}))
-        probes = {mdl: prb for mld, prb in zip(probes_list, model_sweep, strict=True)}
+        probes = {mdl: prb for mdl, prb in zip(model_sweep, probes_list, strict=True)}
         hf_upload_probes(cfg["probing"]["probes_repo"], probes)
         # 2. steering
         cases = dispatch_examples(cfg["steering"])
         sweep = generate_sweep(cfg["steering"])
-        run_single_model_modal = modal_infra.func_wrap(run_single_model, app, cfg)
         results = list(run_single_model_modal.starmap(
             [(c, extract_steering_vectors(probes[c["model"]])) for c in sweep],
             kwargs={"examples": cases}

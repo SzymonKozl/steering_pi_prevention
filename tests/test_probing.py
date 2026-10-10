@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import pytest
 
-from src.probing import (
+from role_steering.probing import (
     ActivationCollector,
     collect_layer_activations,
     extract_role_vectors,
@@ -90,7 +90,13 @@ def test_train_linear_probe():
     clf, acc = train_linear_probe(acts, labels, eval_fraction=0.2)
     assert acc > 0.8
     assert hasattr(clf, "predict")
-    assert set(clf.classes_) == {"system", "user", "assistant"}
+
+
+def test_train_linear_probe_grouped_split():
+    acts, labels = _make_separable_data()
+    groups = [i // 10 for i in range(len(labels))]
+    _, acc = train_linear_probe(acts, labels, groups=groups, eval_fraction=0.2)
+    assert acc > 0.8
 
 
 def test_train_role_probes():
@@ -99,13 +105,15 @@ def test_train_role_probes():
     probes = train_role_probes(layer_acts, labels, eval_fraction=0.2)
     assert 0 in probes and 5 in probes
     assert probes[0]["accuracy"] > 0.8
-    assert "probe" in probes[0]
+    assert set(probes[0]["coef"]) == {"system", "user", "assistant"}
+    assert set(probes[0]["intercept"]) == {"system", "user", "assistant"}
 
 
 def test_extract_role_vectors_multiclass():
     acts, labels = _make_separable_data()
-    clf, _ = train_linear_probe(acts, labels)
-    vectors = extract_role_vectors(clf)
+    classes, y = np.unique(labels, return_inverse=True)
+    clf, _ = train_linear_probe(acts, y)
+    vectors = extract_role_vectors(clf, classes.tolist())["coef"]
     assert "system" in vectors
     assert "user" in vectors
     assert "assistant" in vectors
@@ -118,9 +126,9 @@ def test_extract_role_vectors_binary():
         np.vstack([rng.randn(30, 4) + [3, 0, 0, 0], rng.randn(30, 4) - [3, 0, 0, 0]]),
         dtype=torch.float32,
     )
-    labels = ["pos"] * 30 + ["neg"] * 30
-    clf, _ = train_linear_probe(acts, labels)
-    vectors = extract_role_vectors(clf)
+    labels = [1] * 30 + [0] * 30
+    clf, _ = train_linear_probe(acts, labels, c_val=1.0)
+    vectors = extract_role_vectors(clf, ["neg", "pos"])["coef"]
     assert "pos" in vectors and "neg" in vectors
     cos_sim = torch.dot(vectors["pos"], vectors["neg"]) / (
         vectors["pos"].norm() * vectors["neg"].norm()
@@ -162,7 +170,7 @@ def test_save_load_probes(tmp_path):
 
 def test_predict_role_probabilities():
     acts, labels = _make_separable_data()
-    clf, _ = train_linear_probe(acts, labels)
-    probs = predict_role_probabilities(clf, acts[:5])
+    probes = train_role_probes({0: acts}, labels)
+    probs = predict_role_probabilities(probes[0], acts[:5])
     assert probs.shape == (5, 3)
     assert np.allclose(probs.sum(axis=1), 1.0)
