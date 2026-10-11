@@ -1,20 +1,20 @@
 probing:
-  try_reuse_repo: Yes
+  try_reuse_repo: No
   sample_no: 400
   max_seqlen: 512
   dataset:
     path: allenai/c4
     name: en
     split: validation
-  probes_repo: SzymonKozl/role_steering_demo_probes
+  probes_repo: SzymonKozl/probes_gpt_oss_8_12_16_20
   layers: 
 steering:
   layers:
     - [8]
-  #   - [12],
-  #   - [16],
-  #   - [20],
-  #   - [8, 12, 16, 20]
+    - [12]
+    - [16]
+    - [20]
+    - [8, 12, 16, 20]
   include_baseline: Yes
   temperature: 1.0
   repeats_per_example: 10
@@ -29,6 +29,8 @@ steering:
       params:
         alpha: 
           - 1.0
+          - 4.0
+          - 8.0
   outputs_repo: SzymonKozl/role_steering_demo_outputs
   max_new_tokens: 2048
 eval:
@@ -37,7 +39,7 @@ eval:
 modal:
   gpu: H100
   timeout: 3600
-run_name: role_steering_setup_test_1
+run_name: small_sweep
 wandb_project: role_steering
 wandb_entity: sf-kozlowski-university-of-warsaw
 roles:

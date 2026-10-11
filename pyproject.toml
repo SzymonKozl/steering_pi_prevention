@@ -20,7 +20,9 @@ dependencies = [
     "torch",
     "joblib",
     "scikit-learn",
-    "requests"
+    "requests",
+    "agentdojo",
+    "notebook"
 ]
 
 [tool.pytest.ini_options]

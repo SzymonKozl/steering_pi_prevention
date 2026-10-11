@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 
 DEVICE = "cuda"
+# probing keeps all activations in RAM
+GATHER_PROBES_KWARGS = {"memory": 65536}
 
 
 def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
@@ -63,7 +65,10 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
             labels += [target_role] * len(content_idx)
             groups += [f"{target_role}_{sample_ix}"] * len(content_idx)
     print(f"training classifiers for {model_name}")
-    return train_role_probes({layer: torch.cat(acts) for layer, acts in activations.items()}, labels, groups)
+    # concatenate one layer at a time so the per-sample lists are freed as we go
+    for layer in layers:
+        activations[layer] = torch.cat(activations[layer])
+    return train_role_probes(activations, labels, groups)
 
 
 def _sweep_over_steering_alg(alg_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -79,14 +84,17 @@ def _sweep_over_steering_alg(alg_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 def generate_sweep(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     res = []
     for model in cfg["models"]:
+        model_cfgs = []
         for alg_cfg in cfg["steering_algorithm"].values():
             for alg_params in _sweep_over_steering_alg(alg_cfg):
                 for layer_set in cfg["layers"]:
                     new_cfg = deepcopy(cfg) | {"model": model, "steering_algorithm": alg_params, "layers": layer_set}
                     new_cfg.pop("models")
-                    res.append(new_cfg)
-                    if cfg["include_baseline"]:
-                        res.append(deepcopy(new_cfg) | {"dont_steer": True})
+                    model_cfgs.append(new_cfg)
+        res += model_cfgs
+        # baseline ignores steering params, so one per model is enough
+        if cfg["include_baseline"]:
+            res.append(deepcopy(model_cfgs[0]) | {"dont_steer": True})
     return res
 
 
@@ -114,7 +122,7 @@ def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tens
         outputs = steered_generate(
             model,
             input_ids,
-            layers=list(probes.keys()),
+            layers=cfg["layers"],
             token_roles=[token_roles] * example.repeats,
             role_to_vector=probes,
             operator=cfg["steering_algorithm"]["name"],
@@ -128,11 +136,46 @@ def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tens
     return results
 
 
+def dry_run(cfg: Dict[str, Any]):
+    # prints everything that would be sent to modal, without touching modal / wandb / hf
+    model_sweep = cfg["steering"]["models"]
+    print("=== modal function settings ===")
+    print(f"gather_probes: {modal_infra.function_kwargs(cfg, **GATHER_PROBES_KWARGS)}")
+    print(f"run_single_model: {modal_infra.function_kwargs(cfg)}")
+    print("\n=== 1. probing ===")
+    if cfg["probing"]["try_reuse_repo"]:
+        print(f"no modal call; would download probes for {model_sweep} from {cfg['probing']['probes_repo']}")
+    else:
+        layers = sorted(set.union(*[set(el) for el in cfg["steering"]["layers"]]))
+        for model in model_sweep:
+            print(f"gather_probes({model!r}): layers={layers}, roles={cfg['roles']}, "
+                  f"sample_no={cfg['probing']['sample_no']}, max_seqlen={cfg['probing']['max_seqlen']}, dataset={cfg['probing']['dataset']}")
+        print(f"would upload probes to {cfg['probing']['probes_repo']}")
+    print("\n=== 2. steering: examples (passed to every job) ===")
+    cases = dispatch_examples(cfg["steering"])
+    for case in cases:
+        print(f"{case.name}: repeats={case.repeats}, temperature={case.temperature}, "
+              f"desired_behaviour={case.desired_behaviour is not None}, expected_output={case.expected_output_value!r}")
+        for m in case.messages:
+            print(f"    [{m['role']}] ({len(m['text'])} chars) {m['text'][:150]!r}")
+    print("\n=== 2. steering: jobs ===")
+    sweep = generate_sweep(cfg["steering"])
+    for i, c in enumerate(sweep):
+        print(f"[{i}] {cfg_to_descriptor(c)}: model={c['model']}, layers={c['layers']}, "
+              f"steering_algorithm={c['steering_algorithm']}, dont_steer={c.get('dont_steer', False)}, max_new_tokens={c['max_new_tokens']}")
+    n_gen = len(sweep) * sum(case.repeats for case in cases)
+    print(f"\ntotal: {len(sweep)} jobs x {len(cases)} examples -> {n_gen} generations of up to {cfg['steering']['max_new_tokens']} tokens")
+    print(f"would upload outputs to {cfg['steering']['outputs_repo']}")
+
+
 def main(args: Namespace):
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
         # this flag may be added during later stages
         assert "dont_steer" not in cfg
+    if args.dry_run:
+        dry_run(cfg)
+        return
     # 0. modal & wandb & hf init
     hf_login(token=os.environ["HF_TOKEN"])
     wandb.login(os.environ["WANDB_API_KEY"])
@@ -148,7 +191,7 @@ def main(args: Namespace):
     img = modal_infra.create_image()
     app = modal_infra.get_app("role-probing-app", image=img)
     # 1. activation gathering
-    gather_actiations_modal = modal_infra.func_wrap(gather_probes, app, cfg)
+    gather_actiations_modal = modal_infra.func_wrap(gather_probes, app, cfg, **GATHER_PROBES_KWARGS)
     run_single_model_modal = modal_infra.func_wrap(run_single_model, app, cfg)
     model_sweep = cfg["steering"]["models"]
     with app.run():
@@ -164,8 +207,14 @@ def main(args: Namespace):
         sweep = generate_sweep(cfg["steering"])
         results = list(run_single_model_modal.starmap(
             [(c, extract_steering_vectors(probes[c["model"]])) for c in sweep],
-            kwargs={"examples": cases}
+            kwargs={"examples": cases},
+            return_exceptions=True
         ))
+        # drop failed runs, keep the rest
+        for c, r in zip(sweep, results):
+            if isinstance(r, Exception):
+                print(f"run {cfg_to_descriptor(c)} failed: {r!r}")
+        sweep, results = zip(*[(c, r) for c, r in zip(sweep, results) if not isinstance(r, Exception)])
         logger.info(f"uploading steered outputs to {cfg['steering']['outputs_repo']}")
         hf_upload_steered_outputs(cases, {cfg_to_descriptor(cfg_local): res for cfg_local, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"])
         # 3. evaluating
@@ -187,12 +236,14 @@ def main(args: Namespace):
         logger.info(f"Auto evaluation: ({len(for_auto_eval)} cases)")
         if for_auto_eval:
             results_auto = {
-                cfg_to_descriptor(cfg_local): eval_all(for_auto_eval, resp) for cfg_local, resp in zip(sweep, results)
+                cfg_to_descriptor(cfg_local): eval_all(for_auto_eval, [r for c, r in zip(cases, resp) if c.expected_output_value is not None], cfg)
+                for cfg_local, resp in zip(sweep, results)
             }
             wandb.log({"LLM auto results": wandb.Table(
                 columns=["example_name", "desc"] + list(next(iter(results_auto.values())).keys()),
                 data=[
-                    [s.name, desc, *r.values()] for desc, ress in results_auto.items() for s, r in zip(for_auto_eval, ress)
+                    [s.name, desc, *[np.mean(metric[i]) for metric in ress.values()]]
+                    for desc, ress in results_auto.items() for i, s in enumerate(for_auto_eval)
                 ]
             )})
     wandb.finish()
@@ -201,4 +252,5 @@ def main(args: Namespace):
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--config', required=True, help="path to the configuration yaml file")
+    parser.add_argument('--dry-run', action='store_true', help="print everything that would be sent to modal and exit")
     main(parser.parse_args())

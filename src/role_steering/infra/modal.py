@@ -11,7 +11,7 @@ HF_CACHE_VOL_NAME = "hf-cache"
 HF_CACHE_VOL_PATH = "/hf_cache"
 
 
-def func_wrap(func, app, cfg, **kwargs):
+def function_kwargs(cfg, **kwargs):
     kwargs_default = {
         "gpu": cfg["modal"]["gpu"],
         "timeout": cfg["modal"]["timeout"],
@@ -21,8 +21,12 @@ def func_wrap(func, app, cfg, **kwargs):
         "memory": 16000
     }
     kwargs_default.update(kwargs)
+    return kwargs_default
+
+
+def func_wrap(func, app, cfg, **kwargs):
     return app.function(
-        **kwargs_default
+        **function_kwargs(cfg, **kwargs)
     )(func)
 
 
