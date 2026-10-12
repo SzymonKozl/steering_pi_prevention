@@ -117,7 +117,9 @@ def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tens
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"], trust_remote_code=True)
     results = []
     for example in examples:
-        input_ids, token_roles = tokenize_with_role_preservation(example.messages, tokenizer, add_generation_prompt=True)
+        input_ids, token_roles = tokenize_with_role_preservation(
+            example.messages, tokenizer, add_generation_prompt=True, default_system_prompt=cfg["default_system_prompt"]
+        )
         input_ids = input_ids.to(DEVICE).repeat(example.repeats, 1)
         outputs = steered_generate(
             model,
@@ -162,7 +164,8 @@ def dry_run(cfg: Dict[str, Any]):
     sweep = generate_sweep(cfg["steering"])
     for i, c in enumerate(sweep):
         print(f"[{i}] {cfg_to_descriptor(c)}: model={c['model']}, layers={c['layers']}, "
-              f"steering_algorithm={c['steering_algorithm']}, dont_steer={c.get('dont_steer', False)}, max_new_tokens={c['max_new_tokens']}")
+              f"steering_algorithm={c['steering_algorithm']}, dont_steer={c.get('dont_steer', False)}, max_new_tokens={c['max_new_tokens']}, "
+              f"default_system_prompt={c['default_system_prompt']}")
     n_gen = len(sweep) * sum(case.repeats for case in cases)
     print(f"\ntotal: {len(sweep)} jobs x {len(cases)} examples -> {n_gen} generations of up to {cfg['steering']['max_new_tokens']} tokens")
     print(f"would upload outputs to {cfg['steering']['outputs_repo']}")

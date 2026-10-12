@@ -30,14 +30,27 @@ _GPTOSS_HEADERS = {
 }
 
 
+def _gptoss_default_system_message(tokenizer: AutoTokenizer) -> str:
+    # stock system message (identity, cutoff, date, reasoning effort, channels) as rendered by the chat template
+    rendered = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=False)
+    return rendered[:rendered.index("<|start|>user")]
+
+
 def _tokenize_gptoss(
     input: List[Dict[str, str]],
     tokenizer: AutoTokenizer,
     add_generation_prompt: bool,
     max_tokens_per_message: Optional[int],
+    default_system_prompt: bool,
 ) -> Tuple[torch.Tensor, List[Optional[str]]]:
     segments = []
+    if default_system_prompt:
+        segments.append((_gptoss_default_system_message(tokenizer), None))
     for m in input:
+        if default_system_prompt and m["role"] == "system":
+            # mirror the chat template: custom system text goes into a developer message
+            segments += [("<|start|>developer<|message|># Instructions\n\n", None), (m["text"], m["role"]), ("\n\n<|end|>", None)]
+            continue
         segments += [(f"<|start|>{_GPTOSS_HEADERS[m['role']]}", None), (m["text"], m["role"]), ("<|end|>", None)]
     if add_generation_prompt:
         segments.append(("<|start|>assistant", None))
@@ -56,12 +69,15 @@ def tokenize_with_role_preservation(
     tokenizer: AutoTokenizer,
     add_generation_prompt: bool = False,
     max_tokens_per_message: Optional[int] = None,
+    default_system_prompt: bool = False,
 ) -> Tuple[torch.Tensor, List[Optional[str]]]:
     """
     returns tokenized input (1, T) as well as a list with role for each token (template tokens get None)
+    default_system_prompt: (gpt-oss only) prepend the stock system message and render system messages as
+        developer instructions, like tokenizer.apply_chat_template does; otherwise messages are rendered bare
     """
     if "gpt-oss" in tokenizer.name_or_path:
-        return _tokenize_gptoss(input, tokenizer, add_generation_prompt, max_tokens_per_message)
+        return _tokenize_gptoss(input, tokenizer, add_generation_prompt, max_tokens_per_message, default_system_prompt)
     texts = [m["text"] for m in input]
     if max_tokens_per_message is not None:
         texts = tokenizer.batch_decode(

@@ -32,7 +32,8 @@ steering:
           - 4.0
           - 8.0
   outputs_repo: SzymonKozl/role_steering_demo_outputs
-  max_new_tokens: 2048
+  max_new_tokens: 1024
+  default_system_prompt: Yes
 eval:
   llm_as_a_judge_prompt: prompts/judge_instruction_1.txt
   llm_as_a_judge_model: deepseek/deepseek-v4.1-flash
