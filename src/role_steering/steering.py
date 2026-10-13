@@ -322,3 +322,19 @@ def hf_upload_steered_outputs(samples: List[SampleRunnable], outputs: Dict[str, 
         as_dict[remove_special_chars_from_split_name(model)] = datasets.Dataset.from_list(rows)
     ds = datasets.DatasetDict(as_dict)
     ds.push_to_hub(repo_name, private=False)
+
+
+def hf_download_steered_outputs(samples: List[SampleRunnable], descriptors: List[str], repo_name: str) -> Dict[str, List[List[str]]]:
+    """Inverse of hf_upload_steered_outputs; descriptors missing from the repo (e.g. failed runs) are skipped."""
+    ds = datasets.load_dataset(repo_name)
+    res = {}
+    for desc in descriptors:
+        split = remove_special_chars_from_split_name(desc)
+        if split not in ds:
+            print(f"no outputs for {desc} in {repo_name}, skipping")
+            continue
+        by_name = {}
+        for row in ds[split]:
+            by_name.setdefault(row["name"], []).append(row["response"])
+        res[desc] = [by_name[s.name] for s in samples]
+    return res

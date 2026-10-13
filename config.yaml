@@ -11,9 +11,6 @@ probing:
 steering:
   layers:
     - [8]
-    - [12]
-    - [16]
-    - [20]
     - [8, 12, 16, 20]
   include_baseline: Yes
   temperature: 1.0
@@ -29,20 +26,22 @@ steering:
       params:
         alpha: 
           - 1.0
-          - 4.0
-          - 8.0
-  outputs_repo: SzymonKozl/role_steering_demo_outputs
+          - 10.0
+  outputs_repo: SzymonKozl/role_steering_cot_forgery_with_system_prompt
   max_new_tokens: 1024
   default_system_prompt: Yes
 eval:
+  # skip probing & steering, evaluate outputs already in steering.outputs_repo
+  eval_only: Yes
   llm_as_a_judge_prompt: prompts/judge_instruction_1.txt
   llm_as_a_judge_model: deepseek/deepseek-v4.1-flash
 modal:
   gpu: H100
   timeout: 3600
-run_name: small_sweep
+run_name: cot_forgery_with_system_prompt
 wandb_project: role_steering
 wandb_entity: sf-kozlowski-university-of-warsaw
+wandb_group: role_science_reproduction
 roles:
   - system
   - user

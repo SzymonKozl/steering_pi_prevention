@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -17,11 +18,29 @@ if modal.is_local():
     load_dotenv(REPO_ROOT / ".env")
 
 
+logger = logging.getLogger(__name__)
+
+
 DEFAULT_PROMPT_PATH = (
     REPO_ROOT
     / "prompts"
     / "forgery_prompt_default.yaml"
 )
+
+
+def _format_api_error(error: Any) -> str:
+    # openrouter errors look like {"code": ..., "message": ..., "metadata": {"provider_name": ..., "raw": ...}}
+    if not isinstance(error, dict):
+        return str(error)
+    msg = f"{error.get('message', '')}"
+    metadata = error.get("metadata") or {}
+    if metadata.get("provider_name"):
+        msg += f" (provider: {metadata['provider_name']})"
+    if metadata.get("raw"):
+        msg += f"; raw: {str(metadata['raw'])[:500]}"
+    if metadata.get("reasons"):
+        msg += f"; reasons: {metadata['reasons']}"
+    return msg
 
 
 def call_llm_api(
@@ -33,7 +52,7 @@ def call_llm_api(
     temperature: float = 0.0,
     timeout: int = 60,
     **kwargs: Any,
-) -> str:
+) -> Optional[str]:
     """
     Args:
         messages: List of message dictionaries containing 'role' and 'content'.
@@ -74,9 +93,26 @@ def call_llm_api(
         json=payload,
         timeout=timeout,
     )
+    if not response.ok:
+        try:
+            detail = _format_api_error(response.json().get("error"))
+        except ValueError:
+            detail = response.text[:500]
+        logger.warning(f"LLM API call to {model} failed with HTTP {response.status_code}: {detail}")
     response.raise_for_status()
     data = response.json()
-    return data["choices"][0]["message"]["content"]
+    if "choices" not in data:
+        logger.warning(f"LLM API call to {model} returned no choices: {_format_api_error(data.get('error', data))}")
+        return None
+    choice = data["choices"][0]
+    content = choice["message"].get("content")
+    if choice.get("error") or not content:
+        logger.warning(
+            f"LLM API call to {model} returned empty/failed response "
+            f"(finish_reason={choice.get('finish_reason')!r}, native_finish_reason={choice.get('native_finish_reason')!r})"
+            + (f": {_format_api_error(choice['error'])}" if choice.get("error") else "")
+        )
+    return content
 
 
 def format_generation_prompt(
