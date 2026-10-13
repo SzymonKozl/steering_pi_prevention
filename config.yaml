@@ -1,5 +1,5 @@
 probing:
-  try_reuse_repo: No
+  try_reuse_repo: Yes
   sample_no: 400
   max_seqlen: 512
   dataset:

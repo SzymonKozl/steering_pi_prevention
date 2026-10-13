@@ -185,7 +185,8 @@ def main(args: Namespace):
     wandb.init(
         entity=cfg["wandb_entity"],
         project=cfg["wandb_project"],
-        name=cfg["run_name"]
+        name=cfg["run_name"],
+        group=cfg["run_name"],
     )
     wandb.log({"config": cfg})
     repo = git.Repo(search_parent_directories=True)
