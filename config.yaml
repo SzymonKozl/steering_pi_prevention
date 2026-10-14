@@ -22,7 +22,7 @@ steering:
       path: data/eval_set_1
   steering_algorithm:
     act_add:
-      name: ActAdd
+      name: ProjectionSubtraction
       params:
         alpha: 
           - 1.0
@@ -32,7 +32,7 @@ steering:
   default_system_prompt: Yes
 eval:
   # skip probing & steering, evaluate outputs already in steering.outputs_repo
-  eval_only: Yes
+  eval_only: No
   llm_as_a_judge_prompt: prompts/judge_instruction_1.txt
   llm_as_a_judge_model: deepseek/deepseek-v4.1-flash
 modal:

@@ -25,7 +25,7 @@ from role_steering.infra import modal as modal_infra
 from role_steering.probing import hf_upload_probes, hf_download_probes, train_role_probes, collect_layer_activations, extract_steering_vectors
 from role_steering.data.dataset import dispatch_examples, SampleRunnable
 from role_steering.data.utils import fetch_samples_from_dataset, tokenize_with_role_preservation
-from role_steering.steering import hf_upload_steered_outputs, hf_download_steered_outputs, steered_generate
+from role_steering.steering import hf_upload_steered_outputs, hf_download_steered_outputs, steered_generate, PROJECTION_SUBTRACTION_ROLE_MAP
 from role_steering.eval.eval import eval_all
 from role_steering.eval.llm_judge import judge_all
 
@@ -220,6 +220,7 @@ def main(args: Namespace):
         group=cfg["wandb_group"],
     )
     wandb.log({"config": cfg})
+    wandb.log({"projection_subtraction_role_map": PROJECTION_SUBTRACTION_ROLE_MAP})
     repo = git.Repo(search_parent_directories=True)
     sha = repo.head.object.hexsha
     wandb.log({"commit_sha": sha})

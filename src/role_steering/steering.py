@@ -8,6 +8,10 @@ import datasets
 from role_steering.data.dataset import SampleRunnable
 
 class SteeringOperator(abc.ABC):
+    def vector_role(self, token_role: str) -> Optional[str]:
+        """Role whose steering vector is applied to tokens of `token_role` (None = no steering)."""
+        return token_role
+
     @abc.abstractmethod
     def __call__(
         self,
@@ -40,7 +44,23 @@ class ActAdd(SteeringOperator):
         return states + alpha * vector.to(device=states.device, dtype=states.dtype)
 
 
+# token role -> role whose component gets projected out of that token's states (None = no steering)
+PROJECTION_SUBTRACTION_ROLE_MAP: Dict[str, Optional[str]] = {
+    "system": None,
+    "user": "cot",
+    "cot": None,
+    "tool": "user",
+    "assistant": None,
+}
+
+
 class ProjectionSubtraction(SteeringOperator):
+    def __init__(self, role_map: Dict[str, Optional[str]] = PROJECTION_SUBTRACTION_ROLE_MAP):
+        self.role_map = role_map
+
+    def vector_role(self, token_role: str) -> Optional[str]:
+        return self.role_map.get(token_role)
+
     def __call__(
         self,
         states: torch.Tensor,
@@ -157,7 +177,8 @@ class SteeringHook:
                 continue
 
             for role, indices in self._role_indices[b].items():
-                vector = self.role_to_vector.get(role)
+                vector_role = self.operator.vector_role(role)
+                vector = self.role_to_vector.get(vector_role) if vector_role is not None else None
                 if vector is None:
                     continue
 
