@@ -11,6 +11,9 @@ probing:
 steering:
   layers:
     - [8]
+    - [12]
+    - [16]
+    - [20]
     - [8, 12, 16, 20]
   include_baseline: Yes
   temperature: 1.0
@@ -18,17 +21,17 @@ steering:
   models:
     - openai/gpt-oss-20b
   samples:
-    eval_set_1:
-      path: data/eval_set_1
+    strongreject:
+      path: data/strongreject_20_2137
   steering_algorithm:
     act_add:
       name: ProjectionSubtraction
       params:
-        alpha: 
-          - 1.0
+        alpha:
+          - 2.0
           - 10.0
-  outputs_repo: SzymonKozl/role_steering_cot_forgery_with_system_prompt
-  max_new_tokens: 1024
+  outputs_repo: SzymonKozl/role_steering_cf_sysprompt_proj
+  max_new_tokens: 2048
   default_system_prompt: Yes
 eval:
   # skip probing & steering, evaluate outputs already in steering.outputs_repo
@@ -38,7 +41,7 @@ eval:
 modal:
   gpu: H100
   timeout: 3600
-run_name: cot_forgery_with_system_prompt
+run_name: cf_strongreject_proj
 wandb_project: role_steering
 wandb_entity: sf-kozlowski-university-of-warsaw
 wandb_group: role_science_reproduction

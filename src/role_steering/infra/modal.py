@@ -57,4 +57,4 @@ def get_app(name: str, image):
 
 
 def hf_cache_vol():
-    return modal.Volume.from_name(HF_CACHE_VOL_NAME)
+    return modal.Volume.from_name(HF_CACHE_VOL_NAME, create_if_missing=True)
