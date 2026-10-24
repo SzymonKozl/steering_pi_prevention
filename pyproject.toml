@@ -24,6 +24,8 @@ dependencies = [
     "agentdojo",
     "notebook",
     "matplotlib>=3.11.2",
+    "pytest",
+    "tqdm"
 ]
 
 [tool.pytest.ini_options]

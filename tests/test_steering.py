@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import pytest
 
-from src.steering import (
+from role_steering.steering import (
     ActAdd,
     ProjectionSubtraction,
     SteeringHookManager,
@@ -194,7 +194,7 @@ def test_custom_operator_registration():
 
 
 def test_steered_generate():
-    from src.steering import steered_generate
+    from role_steering.steering import steered_generate
 
     class GenerativeMockLM(MockCausalLM):
         def generate(self, input_ids, use_cache=True, **kwargs):

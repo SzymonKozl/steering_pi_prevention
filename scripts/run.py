@@ -26,7 +26,16 @@ from role_steering.probing import hf_upload_probes, hf_download_probes, train_ro
 from role_steering.data.dataset import dispatch_examples, SampleRunnable
 from role_steering.data.utils import fetch_samples_from_dataset, tokenize_with_role_preservation
 from role_steering.steering import hf_upload_steered_outputs, hf_download_steered_outputs, steered_generate, PROJECTION_SUBTRACTION_ROLE_MAP
-from role_steering.eval.eval import eval_all
+from role_steering.eval.eval import eval_all, eval_agentdojo
+from role_steering.ad_pipeline import (
+    AgentDojoTask,
+    SteeredLLM,
+    build_agentdojo_pipeline,
+    dispatch_agentdojo_tasks,
+    hf_download_agentdojo_outputs,
+    hf_upload_agentdojo_outputs,
+    run_agentdojo_task,
+)
 from role_steering.eval.llm_judge import judge_all
 
 
@@ -56,7 +65,10 @@ def gather_probes(model_name: str, cfg: Dict[str, Any]) -> Dict[int, Dict[str, A
         print(f"role: {target_role}")
         for sample_ix, text_sample in enumerate(tqdm.tqdm(probing_samples, "forwarding calibration set...")):
             input_ids, token_roles = tokenize_with_role_preservation(
-                [{"role": target_role, "text": text_sample}], tokenizer, max_tokens_per_message=cfg["probing"]["max_seqlen"]
+                [{"role": target_role, "text": text_sample}],
+                tokenizer,
+                max_tokens_per_message=cfg["probing"]["max_seqlen"],
+                dummy_tool_calls=True,
             )
             content_idx = [i for i, r in enumerate(token_roles) if r == target_role]
             sample_acts = collect_layer_activations(model, input_ids.to(DEVICE), layers, token_indices=content_idx)
@@ -110,7 +122,20 @@ def cfg_to_descriptor(cfg: Dict[str, Any]) -> str:
         return f"{cfg['model']}_baseline"
 
 
-def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tensor]], examples: List[SampleRunnable]) -> List[List[str]]:
+def dispatch_agentdojo(steering_cfg: Dict[str, Any]) -> List[AgentDojoTask]:
+    ad_cfg = steering_cfg["samples"].get("agent_dojo")
+    return dispatch_agentdojo_tasks(ad_cfg) if ad_cfg else []
+
+
+def run_single_model(
+    cfg: Dict[str, Any],
+    probes: Dict[int, Dict[str, torch.Tensor]],
+    examples: List[SampleRunnable],
+    agentdojo_tasks: List[AgentDojoTask],
+) -> Dict[str, List[List[Any]]]:
+    """
+    Returns {"direct_pi": responses per example, "agent_dojo": episode results per agentdojo task}.
+    """
     dont_steer = cfg.get('dont_steer', False)
     print(f"steering for {cfg['model']}; dont_steer={dont_steer}")
     model = AutoModelForCausalLM.from_pretrained(cfg["model"], trust_remote_code=True).to(DEVICE)
@@ -135,7 +160,12 @@ def run_single_model(cfg: Dict[str, Any], probes: Dict[int, Dict[str, torch.Tens
             dont_steer=dont_steer
         )
         results.append(tokenizer.batch_decode(outputs[:, input_ids.shape[1]:]))
-    return results
+    agentdojo_results = []
+    if agentdojo_tasks:
+        pipeline = build_agentdojo_pipeline(SteeredLLM(model, tokenizer, probes, cfg, temperature=cfg["temperature"]))
+        for task in tqdm.tqdm(agentdojo_tasks, "agentdojo episodes"):
+            agentdojo_results.append(run_agentdojo_task(pipeline, task))
+    return {"direct_pi": results, "agent_dojo": agentdojo_results}
 
 
 def dry_run(cfg: Dict[str, Any]):
@@ -160,6 +190,13 @@ def dry_run(cfg: Dict[str, Any]):
               f"desired_behaviour={case.desired_behaviour is not None}, expected_output={case.expected_output_value!r}")
         for m in case.messages:
             print(f"    [{m['role']}] ({len(m['text'])} chars) {m['text'][:150]!r}")
+    ad_tasks = dispatch_agentdojo(cfg["steering"])
+    if ad_tasks:
+        print(f"agent_dojo ({ad_tasks[0].benchmark_version}): repeats={ad_tasks[0].repeats}")
+        for suite in sorted({t.suite for t in ad_tasks}):
+            n_attacked = sum(t.suite == suite and t.injection_task is not None for t in ad_tasks)
+            n_clean = sum(t.suite == suite and t.injection_task is None for t in ad_tasks)
+            print(f"    {suite}: {n_attacked} attacked (user task, injection task) pairs, {n_clean} clean user tasks")
     print("\n=== 2. steering: jobs ===")
     sweep = generate_sweep(cfg["steering"])
     for i, c in enumerate(sweep):
@@ -167,11 +204,20 @@ def dry_run(cfg: Dict[str, Any]):
               f"steering_algorithm={c['steering_algorithm']}, dont_steer={c.get('dont_steer', False)}, max_new_tokens={c['max_new_tokens']}, "
               f"default_system_prompt={c['default_system_prompt']}")
     n_gen = len(sweep) * sum(case.repeats for case in cases)
+    n_episodes = len(sweep) * sum(t.repeats for t in ad_tasks)
     print(f"\ntotal: {len(sweep)} jobs x {len(cases)} examples -> {n_gen} generations of up to {cfg['steering']['max_new_tokens']} tokens")
+    print(f"total: {len(sweep)} jobs x {len(ad_tasks)} agentdojo tasks -> {n_episodes} agent episodes")
     print(f"would upload outputs to {cfg['steering']['outputs_repo']}")
 
 
-def evaluate(cfg: Dict[str, Any], cases: List[SampleRunnable], sweep: List[Dict[str, Any]], results: List[List[List[str]]]):
+def evaluate(
+    cfg: Dict[str, Any],
+    cases: List[SampleRunnable],
+    sweep: List[Dict[str, Any]],
+    results: List[List[List[str]]],
+    ad_tasks: List[AgentDojoTask],
+    ad_results: List[List[List[Dict[str, Any]]]],
+):
     for_lm_eval = [case for case in cases if case.desired_behaviour is not None]
     for_auto_eval = [case for case in cases if case.expected_output_value is not None]
     logger.info(f"LLM as a judge evaluation: ({len(for_lm_eval)} cases)")
@@ -200,6 +246,13 @@ def evaluate(cfg: Dict[str, Any], cases: List[SampleRunnable], sweep: List[Dict[
                 for desc, ress in results_auto.items() for i, s in enumerate(for_auto_eval)
             ]
         )})
+    logger.info(f"AgentDojo evaluation: ({len(ad_tasks)} tasks)")
+    if ad_tasks:
+        rows = [
+            {"desc": cfg_to_descriptor(cfg_local)} | row
+            for cfg_local, res in zip(sweep, ad_results) for row in eval_agentdojo(ad_tasks, res)
+        ]
+        wandb.log({"AgentDojo results": wandb.Table(columns=list(rows[0]), data=[list(r.values()) for r in rows])})
 
 
 def main(args: Namespace):
@@ -227,11 +280,22 @@ def main(args: Namespace):
     if cfg["eval"].get("eval_only"):
         # skip probing & steering, evaluate outputs already uploaded to outputs_repo
         cases = dispatch_examples(cfg["steering"])
+        ad_tasks = dispatch_agentdojo(cfg["steering"])
         sweep = generate_sweep(cfg["steering"])
+        descs = [cfg_to_descriptor(c) for c in sweep]
         print(f"eval only: loading outputs from {cfg['steering']['outputs_repo']}")
-        outputs = hf_download_steered_outputs(cases, [cfg_to_descriptor(c) for c in sweep], cfg["steering"]["outputs_repo"])
-        sweep = [c for c in sweep if cfg_to_descriptor(c) in outputs]
-        evaluate(cfg, cases, sweep, [outputs[cfg_to_descriptor(c)] for c in sweep])
+        outputs = hf_download_steered_outputs(cases, descs, cfg["steering"]["outputs_repo"]) if cases else {}
+        ad_outputs = hf_download_agentdojo_outputs(ad_tasks, descs, cfg["steering"]["outputs_repo"]) if ad_tasks else {}
+        sweep = [
+            c for c in sweep
+            if (not cases or cfg_to_descriptor(c) in outputs) and (not ad_tasks or cfg_to_descriptor(c) in ad_outputs)
+        ]
+        evaluate(
+            cfg, cases, sweep,
+            [outputs.get(cfg_to_descriptor(c), []) for c in sweep],
+            ad_tasks,
+            [ad_outputs.get(cfg_to_descriptor(c), []) for c in sweep],
+        )
         wandb.finish()
         return
     img = modal_infra.create_image()
@@ -250,10 +314,11 @@ def main(args: Namespace):
             hf_upload_probes(cfg["probing"]["probes_repo"], probes)
         # 2. steering
         cases = dispatch_examples(cfg["steering"])
+        ad_tasks = dispatch_agentdojo(cfg["steering"])
         sweep = generate_sweep(cfg["steering"])
         results = list(run_single_model_modal.starmap(
             [(c, extract_steering_vectors(probes[c["model"]])) for c in sweep],
-            kwargs={"examples": cases},
+            kwargs={"examples": cases, "agentdojo_tasks": ad_tasks},
             return_exceptions=True
         ))
         # drop failed runs, keep the rest
@@ -262,9 +327,16 @@ def main(args: Namespace):
                 print(f"run {cfg_to_descriptor(c)} failed: {r!r}")
         sweep, results = zip(*[(c, r) for c, r in zip(sweep, results) if not isinstance(r, Exception)])
         logger.info(f"uploading steered outputs to {cfg['steering']['outputs_repo']}")
-        hf_upload_steered_outputs(cases, {cfg_to_descriptor(cfg_local): res for cfg_local, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"])
+        if cases:
+            hf_upload_steered_outputs(
+                cases, {cfg_to_descriptor(cfg_local): res["direct_pi"] for cfg_local, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"]
+            )
+        if ad_tasks:
+            hf_upload_agentdojo_outputs(
+                ad_tasks, {cfg_to_descriptor(cfg_local): res["agent_dojo"] for cfg_local, res in zip(sweep, results)}, cfg["steering"]["outputs_repo"]
+            )
     # 3. evaluating
-    evaluate(cfg, cases, sweep, results)
+    evaluate(cfg, cases, sweep, [r["direct_pi"] for r in results], ad_tasks, [r["agent_dojo"] for r in results])
     wandb.finish()
 
 

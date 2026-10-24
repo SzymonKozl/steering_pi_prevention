@@ -21,8 +21,13 @@ steering:
   models:
     - openai/gpt-oss-20b
   samples:
-    strongreject:
-      path: data/strongreject_20_2137
+    direct_pi:
+      strongreject:
+        path: data/strongreject_20_2137
+    agent_dojo:
+      fraction_used: 0.1
+      suites: all
+      seed: 2137 
   steering_algorithm:
     act_add:
       name: ProjectionSubtraction

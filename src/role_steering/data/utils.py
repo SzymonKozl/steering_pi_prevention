@@ -11,10 +11,11 @@ def fetch_samples_from_dataset(path: str, sample_no: int, name: Optional[str] = 
     return [sample["text"] for sample in ds.take(sample_no)]
 
 
-def _to_chat_message(role: str, text: str) -> List[Dict]:
+def _to_chat_message(role: str, text: str, dummy_tool_call: bool) -> List[Dict]:
     if role == "cot":
         return [{"role": "assistant", "thinking": text, "content": ""}]
-    if role == "tool":
+    if role == "tool" and dummy_tool_call:
+        # standalone tool outputs (probing) need a preceding call for the chat template to render them
         tool_call = {"type": "function", "function": {"name": "tool", "arguments": {}}}
         return [{"role": "assistant", "tool_calls": [tool_call]}, {"role": "tool", "content": text}]
     return [{"role": role, "content": text}]
@@ -51,7 +52,10 @@ def _tokenize_gptoss(
             # mirror the chat template: custom system text goes into a developer message
             segments += [("<|start|>developer<|message|># Instructions\n\n", None), (m["text"], m["role"]), ("\n\n<|end|>", None)]
             continue
-        segments += [(f"<|start|>{_GPTOSS_HEADERS[m['role']]}", None), (m["text"], m["role"]), ("<|end|>", None)]
+        header = _GPTOSS_HEADERS[m["role"]]
+        if m["role"] == "tool" and "name" in m:
+            header = f"functions.{m['name']} to=assistant<|channel|>commentary<|message|>"
+        segments += [(f"<|start|>{header}", None), (m["text"], m["role"]), ("<|end|>", None)]
     if add_generation_prompt:
         segments.append(("<|start|>assistant", None))
     input_ids, token_roles = [], []
@@ -70,11 +74,15 @@ def tokenize_with_role_preservation(
     add_generation_prompt: bool = False,
     max_tokens_per_message: Optional[int] = None,
     default_system_prompt: bool = False,
+    dummy_tool_calls: bool = False,
 ) -> Tuple[torch.Tensor, List[Optional[str]]]:
     """
     returns tokenized input (1, T) as well as a list with role for each token (template tokens get None)
     default_system_prompt: (gpt-oss only) prepend the stock system message and render system messages as
         developer instructions, like tokenizer.apply_chat_template does; otherwise messages are rendered bare
+    dummy_tool_calls: (non gpt-oss) precede each tool message with a fake assistant tool call; for probing
+        on isolated tool outputs
+    tool messages may carry an optional "name" (the called function), rendered in the gpt-oss tool header
     """
     if "gpt-oss" in tokenizer.name_or_path:
         return _tokenize_gptoss(input, tokenizer, add_generation_prompt, max_tokens_per_message, default_system_prompt)
@@ -83,7 +91,7 @@ def tokenize_with_role_preservation(
         texts = tokenizer.batch_decode(
             tokenizer(texts, add_special_tokens=False, truncation=True, max_length=max_tokens_per_message).input_ids
         )
-    chat = [cm for m, t in zip(input, texts) for cm in _to_chat_message(m["role"], t)]
+    chat = [cm for m, t in zip(input, texts) for cm in _to_chat_message(m["role"], t, dummy_tool_calls)]
     rendered = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=add_generation_prompt)
 
     spans = []

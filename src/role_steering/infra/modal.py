@@ -46,7 +46,9 @@ def create_image():
         "zstandard",
         "kaleido",
         "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.5.4/flash_attn-2.8.3+cu128torch2.9-cp312-cp312-linux_x86_64.whl",
-        "cuml-cu13==26.4.0"
+        "cuml-cu13==26.4.0",
+        # same version as locally: agentdojo tasks are sampled locally and looked up by id on modal
+        "agentdojo==0.1.35",
     ], extra_index_url="https://pypi.nvidia.com").workdir("/app").env({"HF_HOME": HF_CACHE_VOL_PATH}).add_local_dir(REPO_ROOT, "/app")
     return image
 

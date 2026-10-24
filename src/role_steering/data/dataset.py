@@ -20,7 +20,7 @@ def dispatch_examples(config: Dict[str, Any]) -> List[SampleRunnable]:
         config: Evaluation configuration dictionary.
     """
     res = []
-    for set_name, set_cfg in config["samples"].items():
+    for set_name, set_cfg in config["samples"].get("direct_pi", {}).items():
         path = Path(set_cfg["path"])
         for file in sorted(path.glob("*.json")) if path.is_dir() else [path]:
             with open(file, "r", encoding="utf-8") as f:

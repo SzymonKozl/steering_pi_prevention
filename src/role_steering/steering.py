@@ -226,7 +226,7 @@ class SteeringHookManager:
         self.model = model
         self.layers = layers
         self.token_roles = (
-            [token_roles] if token_roles and isinstance(token_roles[0], str) else token_roles  # type: ignore
+            [token_roles] if token_roles and not isinstance(token_roles[0], list) else token_roles  # type: ignore
         )
         self.role_to_vector = role_to_vector
         self.operator = get_steering_operator(operator)
@@ -304,6 +304,9 @@ def steered_generate(
         use_cache: Whether generation uses KV caching.
         generate_kwargs: Additional kwargs passed to model.generate.
     """
+    if attention_mask is None:
+        # otherwise generate infers the mask from pad_token_id, masking any pad tokens inside the prompt
+        attention_mask = torch.ones_like(input_ids)
     if not dont_steer:
         with SteeringHookManager(
             model=model,

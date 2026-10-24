@@ -9,9 +9,7 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 from huggingface_hub import create_repo, upload_file, hf_hub_download
-import modal
-if not modal.is_local():
-    import tqdm
+import tqdm
 
 from role_steering.steering import get_model_layers
 
@@ -110,6 +108,8 @@ def collect_layer_activations(
         attention_mask: Optional attention mask.
         token_indices: Specific token indices to gather.
     """
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids)
     model.eval()
     with ActivationCollector(model, layers, token_indices) as collector:
         with torch.no_grad():
