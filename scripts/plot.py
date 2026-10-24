@@ -165,6 +165,8 @@ def main(args: Namespace):
             values = {(row[ex_i], row[desc_i]): row[m_i] for row in data}
             title = f"{key}: {metric}"
             path = out_dir / f"{re.sub(r'[^\w]+', '_', title).strip('_').lower()}.png"
+            examples += ["avg"]
+            values |= {("avg", d): np.nanmean(np.array([values[k] for k in values.keys() if k[1] == d])) for d in descs}
             plot_metric(title, examples, descs, values, colors, path)
             charts[title] = path
             print(f"saved {path}")
