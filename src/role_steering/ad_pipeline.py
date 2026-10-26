@@ -1,5 +1,6 @@
 import json
 import random
+import re
 from dataclasses import dataclass
 from itertools import product
 from typing import Any, Dict, List, Optional, Sequence
@@ -55,15 +56,26 @@ def _check_cfg(cfg: Dict[str, Any], model: nn.Module, vectors: Dict[int, Dict[st
             raise ValueError(f"layer {l} is missing steering vectors for roles {missing}")
 
 
-def _gptoss_final_channel(completion: str) -> str:
-    # harmony output: analysis channel, then the final channel; drop the reasoning so it can't be parsed as a tool call
-    marker = "<|channel|>final<|message|>"
-    if marker not in completion:
+def _gptoss_parse_completion(completion: str) -> str:
+    """
+    Harmony output: an analysis message, then either a final answer or a tool call on the commentary channel. A tool
+    call can use the prompted <function=...> format or gpt-oss's native recipient header
+    ("<|channel|>commentary to=functions.NAME <|constrain|>json<|message|>{args}<|call|>"); the latter is converted
+    to the prompted format so _parse_model_output picks it up. Reasoning is dropped so it can't be parsed as a tool call.
+    """
+    last = completion.rsplit("<|start|>", 1)[-1]
+    if "<|message|>" not in last:
         return ""
-    final = completion.rsplit(marker, 1)[1]
+    header, body = last.split("<|message|>", 1)
     for stop in ["<|return|>", "<|end|>", "<|call|>"]:
-        final = final.split(stop, 1)[0]
-    return final
+        body = body.split(stop, 1)[0]
+    recipient = re.search(r"to=functions\.([^\s<]+)", header)
+    if recipient:
+        return f"<function={recipient.group(1)}>{body.strip()}</function>"
+    if "<|channel|>analysis" in header:
+        # generation ran out of tokens before leaving the reasoning
+        return ""
+    return body
 
 
 class SteeredLLM(BasePipelineElement):
@@ -143,7 +155,7 @@ class SteeredLLM(BasePipelineElement):
 
         new_tokens = generation[0, input_ids.shape[1]:]
         if self.is_gptoss:
-            completion = _gptoss_final_channel(self.tokenizer.decode(new_tokens))
+            completion = _gptoss_parse_completion(self.tokenizer.decode(new_tokens))
         else:
             completion = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
         output = _parse_model_output(completion)
@@ -190,7 +202,8 @@ def dispatch_agentdojo_tasks(config: Dict[str, Any]) -> List[AgentDojoTask]:
         pairs = sorted(product(suite.user_tasks, suite.injection_tasks))
         # seeding per suite keeps a suite's sample independent of which other suites are selected
         rng = random.Random(f"{config['seed']}/{suite_name}")
-        sampled = sorted(rng.sample(pairs, max(1, round(config["fraction_used"] * len(pairs)))))
+        no_to_sample = max(1, round(config["fraction_used"] * len(pairs))) if "fraction_used" in config else config["samples_per_suite"]
+        sampled = sorted(rng.sample(pairs, no_to_sample))
         attacked += [AgentDojoTask(suite_name, u, i, repeats, version) for u, i in sampled]
         clean += [AgentDojoTask(suite_name, u, None, repeats, version) for u in sorted({u for u, _ in sampled})]
     return attacked + clean
